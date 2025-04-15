@@ -6,3 +6,4 @@ numpy
 pandas
 scipy
 midi2audio
+setuptools>=65.0.0
