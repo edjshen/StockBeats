@@ -1,0 +1,8 @@
+#requirements file
+streamlit
+yfinance
+pretty_midi
+numpy
+pandas
+scipy
+midi2audio
