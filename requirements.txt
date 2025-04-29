@@ -1,5 +1,5 @@
 #requirements file
-streamlit
+streamlit>=1.10.0
 yfinance
 pretty_midi
 numpy
