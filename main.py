@@ -4,11 +4,9 @@ import pretty_midi
 import numpy as np
 import pandas as pd
 import io
-from scipy.io import wavfile
 import time
-import tempfile
-import os
-from midi2audio import FluidSynth as MidiSynth
+import pygame
+import base64
 
 # Set page config
 st.set_page_config(
@@ -16,6 +14,9 @@ st.set_page_config(
     page_icon="🎵",
     layout="wide"
 )
+
+if 'button_clicked' not in st.session_state:
+    st.session_state.button_clicked = False
 
 # Define musical keys and modes
 KEYS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -43,11 +44,11 @@ INSTRUMENTS = {
     "Synth Lead": 80
 }
 
-# Soundfont path - specified explicitly
-SOUNDFONT_PATH = r"C:\ProgramData\soundfonts\default.sf2"
+# Define measure options
+MEASURE_OPTIONS = [4, 8, 16, 32]
 
 @st.cache_data(ttl=3600)
-def get_financial_data(ticker_symbol, period="5y", interval="1mo"):
+def getFinancialData(ticker_symbol, period="5y", interval="1mo"):
     """Fetch financial data for a given ticker and calculate monthly returns."""
     try:
         ticker = yf.Ticker(ticker_symbol)
@@ -58,6 +59,12 @@ def get_financial_data(ticker_symbol, period="5y", interval="1mo"):
         
         # Calculate monthly returns
         hist_data['Monthly_Return'] = hist_data['Close'].pct_change() * 100
+        
+        # Calculate volatility (standard deviation of returns)
+        volatility = hist_data['Monthly_Return'].rolling(window=3).std().fillna(
+            hist_data['Monthly_Return'].std()
+        )
+        hist_data['Volatility'] = volatility
         
         # Get company info
         try:
@@ -73,8 +80,8 @@ def get_financial_data(ticker_symbol, period="5y", interval="1mo"):
         st.error(f"Error fetching data for {ticker_symbol}: {e}")
         return None
 
-def create_midi_from_returns(returns, key, mode, instrument=0, base_octave=4, note_duration=0.5, tempo=120):
-    """Create a MIDI file from financial returns data based on key and mode."""
+def createMidiFromReturns(returns, volatilities, key, mode, instrument=0, base_octave=4, tempo=120, num_notes=None):
+    """Create a MIDI file from financial returns data based on key and mode with varying rhythm."""
     # Create a PrettyMIDI object
     midi_data = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     
@@ -85,106 +92,129 @@ def create_midi_from_returns(returns, key, mode, instrument=0, base_octave=4, no
     key_offset = KEYS.index(key)
     mode_intervals = MODES[mode]
     
-    # Map returns to notes in the scale
-    for i, ret in enumerate(returns):
-        if pd.isna(ret):
+    # Define note durations
+    min_duration = 0.25  # 16th note
+    max_duration = 2.0   # half note
+    
+    # Handle case where volatilities list might be shorter than returns
+    if len(volatilities) < len(returns):
+        mean_vol = sum(volatilities) / len(volatilities) if volatilities else 0
+        volatilities.extend([mean_vol] * (len(returns) - len(volatilities)))
+    
+    # If num_notes is specified, use only the last num_notes
+    if num_notes is not None:
+        returns = returns[-num_notes:]
+        volatilities = volatilities[-num_notes:]
+    
+    current_time = 0.0
+    
+    for i, (ret, vol) in enumerate(zip(returns, volatilities)):
+        if pd.isna(ret) or pd.isna(vol):
             continue
             
-        # Map return to a note in the scale (positive returns: higher notes)
-        normalized_return = min(max(ret, -20), 20)  # Clamp between -20% and 20%
+        normalized_return = min(max(ret, -20), 20)
         scale_index = int((normalized_return + 20) / 40 * len(mode_intervals))
         scale_index = min(max(scale_index, 0), len(mode_intervals) - 1)
         
-        # Get the note number
         note_offset = mode_intervals[scale_index]
         note_number = key_offset + note_offset + (base_octave * 12)
         
-        # Adjust octave for very high/low returns
         octave_adjust = 0
         if ret > 10:
-            octave_adjust = min(int(ret / 10), 2)  # Up to 2 octaves higher for big positive returns
+            octave_adjust = min(int(ret / 10), 2)
         elif ret < -10:
-            octave_adjust = max(int(ret / 10), -2)  # Up to 2 octaves lower for big negative returns
+            octave_adjust = max(int(ret / 10), -2)
         
         note_number += (octave_adjust * 12)
-        note_number = min(max(note_number, 0), 127)  # Ensure within MIDI range
+        note_number = min(max(note_number, 0), 127)
         
-        # Create a Note instance
-        note_start = i * 60 / tempo * (note_duration * 4)
+        vol_range = max(volatilities) - min(volatilities) if len(set(volatilities)) > 1 else 1.0
+        if vol_range > 0:
+            norm_vol = (vol - min(volatilities)) / vol_range
+        else:
+            norm_vol = 0.5
+        
+        inv_norm_vol = 1.0 - norm_vol
+        note_duration = min_duration + (inv_norm_vol * (max_duration - min_duration))
+        duration_seconds = 60 / tempo * note_duration
+        
         note = pretty_midi.Note(
-            velocity=max(60, min(100 + int(ret), 127)),  # Velocity based on return magnitude
+            velocity=max(60, min(100 + int(ret), 127)),
             pitch=note_number,
-            start=note_start,
-            end=note_start + (60 / tempo * (note_duration * 4))
+            start=current_time,
+            end=current_time + duration_seconds
         )
         
-        # Add the note to our instrument
+        current_time += duration_seconds
         instrument_obj.notes.append(note)
     
-    # Add the instrument to the PrettyMIDI object
     midi_data.instruments.append(instrument_obj)
-    
-    # Get MIDI as bytes for download
     midi_bytes = io.BytesIO()
     midi_data.write(midi_bytes)
     midi_bytes.seek(0)
     
     return midi_data, midi_bytes.getvalue()
 
-def convert_midi_to_audio(midi_data):
-    """Convert MIDI data to audio for playback using direct FluidSynth call."""
-    try:
-        # Get MIDI as bytes for conversion
-        midi_bytes = io.BytesIO()
-        midi_data.write(midi_bytes)
-        midi_bytes.seek(0)
-        
-        # Create a temporary MIDI file
-        with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as temp_midi:
-            temp_midi.write(midi_bytes.getvalue())
-            temp_midi_path = temp_midi.name
-        
-        # Create a temporary WAV file path
-        temp_wav_path = temp_midi_path.replace('.mid', '.wav')
-        
-        # Construct the FluidSynth command directly
-        cmd = [
-            'fluidsynth', 
-            '-ni',  # Non-interactive mode
-            '-g', '1.0',  # Gain
-            '-r', '44100',  # Sample rate
-            '-F', temp_wav_path,  # Output file
-            SOUNDFONT_PATH,  # Soundfont path
-            temp_midi_path  # Input MIDI file
-        ]
-        
-        # Execute the command
-        import subprocess
-        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Read the WAV file into memory
-        virtual_file = io.BytesIO()
-        with open(temp_wav_path, 'rb') as wav_file:
-            virtual_file.write(wav_file.read())
-        virtual_file.seek(0)
-        
-        # Clean up temporary files
-        os.remove(temp_midi_path)
-        os.remove(temp_wav_path)
-        
-        return virtual_file
-    except Exception as e:
-        st.error(f"Error converting MIDI to audio: {e}")
-        st.info(f"Audio preview requires FluidSynth to be installed and a valid soundfont file at {SOUNDFONT_PATH}")
-        return None
+def simple_note_synthesis(frequency, duration, sample_rate=44100, amplitude=0.5):
+    t = np.linspace(0, duration, int(sample_rate * duration), False)
+    envelope = np.ones_like(t)
+    attack = int(0.05 * sample_rate)
+    release = int(0.1 * sample_rate)
+    if len(t) > attack:
+        envelope[:attack] = np.linspace(0, 1, attack)
+    if len(t) > release:
+        envelope[-release:] = np.linspace(1, 0, release)
+    note = amplitude * np.sin(2 * np.pi * frequency * t) * envelope
+    return note
 
+def midi_to_wav(midi_data, sample_rate=44100):
+    duration = midi_data.get_end_time() + 1
+    audio = np.zeros(int(sample_rate * duration))
+    for instrument in midi_data.instruments:
+        for note in instrument.notes:
+            frequency = 440.0 * (2.0 ** ((note.pitch - 69) / 12.0))
+            start_sample = int(note.start * sample_rate)
+            end_sample = int(note.end * sample_rate)
+            note_duration = note.end - note.start
+            note_audio = simple_note_synthesis(
+                frequency, 
+                note_duration, 
+                sample_rate, 
+                amplitude=note.velocity / 127.0 * 0.5
+            )
+            end_idx = min(start_sample + len(note_audio), len(audio))
+            audio[start_sample:end_idx] += note_audio[:end_idx-start_sample]
+    if np.max(np.abs(audio)) > 0:
+        audio = audio / np.max(np.abs(audio)) * 0.9
+    audio_int16 = np.int16(audio * 32767)
+    audio_stereo = np.column_stack((audio_int16, audio_int16))
+    import wave
+    import struct
+    virtual_file = io.BytesIO()
+    with wave.open(virtual_file, 'wb') as wav_file:
+        wav_file.setnchannels(2)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        for sample in audio_stereo:
+            wav_file.writeframes(struct.pack('<hh', sample[0], sample[1]))
+    virtual_file.seek(0)
+    return virtual_file
 
+def create_audio_player_html(wav_data):
+    base64_wav = base64.b64encode(wav_data.read()).decode('utf-8')
+    wav_data.seek(0)
+    audio_html = f"""
+    <audio controls style="width: 100%;">
+        <source src="data:audio/wav;base64,{base64_wav}" type="audio/wav">
+        Your browser does not support the audio element.
+    </audio>
+    """
+    return audio_html
 
 def main():
     st.title("🎵 Financial MIDI Melody Generator")
     st.markdown("Transform stock market performance into musical melodies")
     
-    # Sidebar with information
     with st.sidebar:
         st.header("About")
         st.info("""
@@ -193,10 +223,9 @@ def main():
         1. Enter a ticker symbol
         2. Select a musical key and mode
         3. Adjust advanced options if desired
-        4. Generate and listen to your melody
-        5. Download as a MIDI file
+        4. Generate your melody
+        5. Preview and download as a MIDI file
         """)
-        
         st.header("How it works")
         st.write("""
         - Monthly price changes are mapped to musical notes
@@ -204,99 +233,82 @@ def main():
         - Negative returns create lower notes
         - The magnitude of returns affects the pitch range
         """)
-        
-        # Display soundfont information
-        st.header("Audio Settings")
-        st.info(f"Using soundfont: {SOUNDFONT_PATH}")
     
-    # Main input area with clean layout
     col1, col2, col3 = st.columns([2, 1, 1])
-    
     with col1:
         ticker_symbol = st.text_input("Enter Ticker Symbol", "AAPL")
-    
     with col2:
         key = st.selectbox("Select Key", KEYS)
-    
     with col3:
         mode = st.selectbox("Select Mode", list(MODES.keys()))
     
-    # Advanced options in expandable section
+    # User can select MIDI length (number of measures)
+    midi_length_measures = st.selectbox("Select MIDI Length (Measures)", MEASURE_OPTIONS, index=0)
+    
+    optionsList = ["3mo", "1y", "3y", "5y", "10y", "max"]
     with st.expander("Advanced Options"):
         col1, col2 = st.columns(2)
-        
         with col1:
-            period = st.selectbox("Time Period", 
-                           ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"], 
-                           index=3)
+            period = st.selectbox("Lookback Period (Financial Data)", optionsList, index=1)
             tempo = st.slider("Tempo (BPM)", 60, 180, 120, 5)
-        
         with col2:
             base_octave = st.slider("Base Octave", 2, 6, 4)
             instrument_name = st.selectbox("Instrument", list(INSTRUMENTS.keys()))
             instrument = INSTRUMENTS[instrument_name]
     
-    # Generate button with full width
     if st.button("Generate Melody", use_container_width=True):
         if not ticker_symbol:
             st.error("Please enter a ticker symbol")
             return
         
-        # Progress indicators
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Fetch data
+        # Fetch data using the selected lookback period
+        selected_period = period
         status_text.text(f"Fetching data for {ticker_symbol}...")
-        data = get_financial_data(ticker_symbol, period=period)
-        progress_bar.progress(33)
+        data = getFinancialData(ticker_symbol, period=selected_period)
+        progress_bar.progress(40)
         
         if data is not None and not data.empty:
-            # Get company information
             company_name = data.attrs.get('company_name', ticker_symbol)
-            
-            # Step 2: Process data
             status_text.text("Processing financial data...")
             monthly_returns = data['Monthly_Return'].dropna().tolist()
-            progress_bar.progress(66)
+            volatilities = data['Volatility'].dropna().tolist()
+            progress_bar.progress(60)
             
-            # Display the financial data
             st.subheader(f"{company_name} ({ticker_symbol}) - Monthly Returns")
-            
-            # Chart and metrics
             chart_col, metrics_col = st.columns([3, 1])
             with chart_col:
                 st.line_chart(data['Monthly_Return'].dropna())
-            
             with metrics_col:
                 st.metric("Average Monthly Return", f"{data['Monthly_Return'].mean():.2f}%")
                 st.metric("Maximum Return", f"{data['Monthly_Return'].max():.2f}%")
                 st.metric("Minimum Return", f"{data['Monthly_Return'].min():.2f}%")
             
-            # Step 3: Generate MIDI
-            status_text.text("Creating melody...")
-            midi_data, midi_bytes = create_midi_from_returns(
-                monthly_returns, key, mode, instrument, base_octave, 0.5, tempo
-            )
+            # Each measure is 4 notes (assuming 4/4), so total notes = measures * 4
+            num_notes = midi_length_measures * 4
             
-            # Step 4: Convert to audio
-            status_text.text("Converting to audio with custom soundfont...")
-            virtual_file = convert_midi_to_audio(midi_data)
+            status_text.text("Creating melody...")
+            midi_data, midi_bytes = createMidiFromReturns(
+                monthly_returns, volatilities, key, mode, instrument, base_octave, tempo, num_notes=num_notes
+            )
+            progress_bar.progress(80)
+            
+            status_text.text("Generating audio preview...")
+            wav_file = midi_to_wav(midi_data)
             progress_bar.progress(100)
             status_text.empty()
             
-            # Display playback and download section
             st.subheader(f"Your {key} {mode} Financial Melody")
-            
-            # Audio player and download button
-            audio_col, download_col = st.columns([3, 1])
-            with audio_col:
-                if virtual_file:
-                    st.audio(virtual_file)
+            preview_tab, download_tab = st.tabs(["Audio Preview", "Download MIDI"])
+            with preview_tab:
+                if wav_file:
+                    audio_player = create_audio_player_html(wav_file)
+                    st.markdown(audio_player, unsafe_allow_html=True)
                 else:
-                    st.warning("Audio preview not available. Please download the MIDI file.")
-            
-            with download_col:
+                    st.warning("Audio preview could not be generated. You can still download the MIDI file.")
+            with download_tab:
                 st.download_button(
                     "Download MIDI File",
                     midi_bytes,
@@ -304,13 +316,14 @@ def main():
                     mime="audio/midi",
                     use_container_width=True
                 )
-            
-            # Explanation of the melody
+                st.caption("Download the MIDI file to play in your favorite media player or DAW software.")
             st.info(f"""
             This melody represents the monthly price performance of {company_name} ({ticker_symbol}).
             - Each note corresponds to a monthly return
             - Higher notes represent positive returns
             - Lower notes represent negative returns
+            - Higher volatility creates faster rhythms (shorter notes)
+            - Lower volatility creates slower rhythms (longer notes)
             - Melody is in {key} {mode} at {tempo} BPM using {instrument_name}
             """)
         else:
