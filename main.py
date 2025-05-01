@@ -48,7 +48,7 @@ INSTRUMENTS = {
 MEASURE_OPTIONS = [4, 8, 16, 32]
 
 @st.cache_data(ttl=3600)
-def getFinancialData(ticker_symbol, period="5y", interval="1mo",max_retries=3):
+def getFinancialData(ticker_symbol, period="5y", interval="1mo",max_retries=1):
     """Fetch financial data for a given ticker and calculate monthly returns."""
     for attempt in range(max_retries):
         try:

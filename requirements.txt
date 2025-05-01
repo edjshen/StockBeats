@@ -1,6 +1,6 @@
 #requirements file
 streamlit>=1.10.0
-yfinance>=0.2.54
+yfinance==0.2.54
 pretty_midi
 numpy
 pandas
