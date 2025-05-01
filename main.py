@@ -7,6 +7,13 @@ import io
 import time
 import pygame
 import base64
+import requests
+
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
+})
+yf.set_tz_cache_location(".cache")  # Set cache location to a writable directory
 
 # Set page config
 st.set_page_config(

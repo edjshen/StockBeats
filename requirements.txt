@@ -11,3 +11,4 @@ pygame
 requests>=2.21
 multitasking>=0.0.7
 pandas_datareader
+requests
