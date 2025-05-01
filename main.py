@@ -48,37 +48,44 @@ INSTRUMENTS = {
 MEASURE_OPTIONS = [4, 8, 16, 32]
 
 @st.cache_data(ttl=3600)
-def getFinancialData(ticker_symbol, period="5y", interval="1mo"):
+def getFinancialData(ticker_symbol, period="5y", interval="1mo",max_retries=3):
     """Fetch financial data for a given ticker and calculate monthly returns."""
-    try:
-        ticker = yf.Ticker(ticker_symbol)
-        hist_data = ticker.history(period=period, interval=interval)
-        
-        if hist_data.empty:
-            return None
-        
-        # Calculate monthly returns
-        hist_data['Monthly_Return'] = hist_data['Close'].pct_change() * 100
-        
-        # Calculate volatility (standard deviation of returns)
-        volatility = hist_data['Monthly_Return'].rolling(window=3).std().fillna(
-            hist_data['Monthly_Return'].std()
-        )
-        hist_data['Volatility'] = volatility
-        
-        # Get company info
+    for attempt in range(max_retries):
         try:
-            info = ticker.info
-            hist_data.attrs['company_name'] = info.get('shortName', ticker_symbol)
-            hist_data.attrs['currency'] = info.get('currency', 'USD')
-        except:
-            hist_data.attrs['company_name'] = ticker_symbol
-            hist_data.attrs['currency'] = 'USD'
-        
-        return hist_data
-    except Exception as e:
-        st.error(f"Error fetching data for {ticker_symbol}: {e}")
-        return None
+            ticker = yf.Ticker(ticker_symbol)
+            hist_data = ticker.history(period=period, interval=interval)
+            
+            if hist_data.empty:
+                return None
+            
+            # Calculate monthly returns
+            hist_data['Monthly_Return'] = hist_data['Close'].pct_change() * 100
+            
+            # Calculate volatility (standard deviation of returns)
+            volatility = hist_data['Monthly_Return'].rolling(window=3).std().fillna(
+                hist_data['Monthly_Return'].std()
+            )
+            hist_data['Volatility'] = volatility
+            
+            # Get company info
+            try:
+                info = ticker.info
+                hist_data.attrs['company_name'] = info.get('shortName', ticker_symbol)
+                hist_data.attrs['currency'] = info.get('currency', 'USD')
+            except:
+                hist_data.attrs['company_name'] = ticker_symbol
+                hist_data.attrs['currency'] = 'USD'
+            
+            return hist_data
+        except Exception as e:
+            st.error(f"Error fetching data for {ticker_symbol}: {e}")
+            if "Rate limited" in str(e) and attempt < max_retries - 1:
+                # Exponential backoff: wait longer between retries
+                wait_time = (2 ** attempt) + 1
+                print(f"Rate limited. Waiting {wait_time} seconds before retry...")
+                time.sleep(wait_time)
+            else:
+                raise
 
 def createMidiFromReturns(returns, volatilities, key, mode, instrument=0, base_octave=4, tempo=120, num_notes=None):
     """Create a MIDI file from financial returns data based on key and mode with varying rhythm."""
