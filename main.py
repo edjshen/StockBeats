@@ -8,6 +8,8 @@ import time
 import pygame
 import base64
 import requests
+import requests
+from alpha_vantage.timeseries import TimeSeries
 
 session = requests.Session()
 session.headers.update({
@@ -55,8 +57,80 @@ INSTRUMENTS = {
 MEASURE_OPTIONS = [4, 8, 16, 32]
 
 @st.cache_data(ttl=3600)
-def getFinancialData(ticker_symbol, period="5y", interval="1mo",max_retries=1):
-    """Fetch financial data for a given ticker and calculate monthly returns."""
+def getAlphaVantageData(ticker_symbol, period="5y", interval="1mo"):
+    """Fetch financial data from Alpha Vantage API."""
+    # Get API key from streamlit secrets
+    api_key = st.secrets["AlphaVantageAPIkey"]
+    
+    # Initialize Alpha Vantage TimeSeries
+    ts = TimeSeries(key=api_key, output_format='pandas')
+    
+    # Choose the appropriate function based on the interval
+    if interval == "1mo":
+        data, meta_data = ts.get_monthly(symbol=ticker_symbol)
+    elif interval == "1d":
+        data, meta_data = ts.get_daily(symbol=ticker_symbol, outputsize='full')
+    else:
+        # For other intervals, we will fall back to yfinance
+        raise ValueError(f"Interval {interval} not directly supported with Alpha Vantage in this app.")
+    
+    # Rename columns to match yfinance format
+    data.rename(columns={
+        '1. open': 'Open',
+        '2. high': 'High',
+        '3. low': 'Low',
+        '4. close': 'Close',
+        '5. volume': 'Volume'
+    }, inplace=True)
+    
+    # Apply period filtering
+    if period != "max":
+        if period == "5y":
+            cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=5)
+        elif period == "3y":
+            cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=3)
+        elif period == "1y":
+            cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=1)
+        elif period == "3mo":
+            cutoff_date = pd.Timestamp.now() - pd.DateOffset(months=3)
+        elif period == "10y":
+            cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=10)
+        data = data[data.index >= cutoff_date]
+    
+    # Calculate monthly returns
+    data['Monthly_Return'] = data['Close'].pct_change() * 100
+    
+    # Calculate volatility
+    volatility = data['Monthly_Return'].rolling(window=3).std().fillna(
+        data['Monthly_Return'].std()
+    )
+    data['Volatility'] = volatility
+    
+    # Set metadata
+    data.attrs['company_name'] = ticker_symbol
+    data.attrs['currency'] = 'USD'
+    
+    return data
+
+@st.cache_data(ttl=3600)
+def getFinancialData(ticker_symbol, period="5y", interval="1mo", max_retries=1):
+    """Fetch financial data for a given ticker, first trying Alpha Vantage, then yfinance as fallback."""
+    # First try using Alpha Vantage
+    try:
+        # Check if Alpha Vantage API key is available
+        if "AlphaVantageAPIkey" in st.secrets:
+            st.info("Fetching data from Alpha Vantage...")
+            data = getAlphaVantageData(ticker_symbol, period, interval)
+            if data is not None and not data.empty:
+                st.success("Successfully retrieved data from Alpha Vantage")
+                return data
+        else:
+            st.warning("Alpha Vantage API key not found in secrets. Falling back to yfinance.")
+    except Exception as e:
+        st.warning(f"Alpha Vantage error: {e}. Falling back to yfinance.")
+    
+    # If Alpha Vantage failed or key not found, fall back to yfinance
+    st.info("Fetching data from yfinance...")
     for attempt in range(max_retries):
         try:
             ticker = yf.Ticker(ticker_symbol)
@@ -83,6 +157,7 @@ def getFinancialData(ticker_symbol, period="5y", interval="1mo",max_retries=1):
                 hist_data.attrs['company_name'] = ticker_symbol
                 hist_data.attrs['currency'] = 'USD'
             
+            st.success("Successfully retrieved data from yfinance")
             return hist_data
         except Exception as e:
             st.error(f"Error fetching data for {ticker_symbol}: {e}")
@@ -93,6 +168,7 @@ def getFinancialData(ticker_symbol, period="5y", interval="1mo",max_retries=1):
                 time.sleep(wait_time)
             else:
                 raise
+
 
 def createMidiFromReturns(returns, volatilities, key, mode, instrument=0, base_octave=4, tempo=120, num_notes=None):
     """Create a MIDI file from financial returns data based on key and mode with varying rhythm."""
